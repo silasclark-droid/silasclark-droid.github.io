@@ -36,6 +36,7 @@ body{background:#000;display:flex;flex-direction:column;align-items:center;justi
 #cvwrap{position:relative;flex-shrink:0}
 #gc{display:block}
 </style>
+<script src="https://unpkg.com/peerjs@1.4.7/dist/peerjs.min.js"></script>
 </head>
 <body>
 <div id="ui">
@@ -370,6 +371,14 @@ const GHOST_CONTROL_SETS=[
   {name:'ARROWS',up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight',label:'Ghost 4'}
 ];
 let p2Score=0;
+let peer=null;
+let peerRole=null; // 'host' or 'client'
+let peerRoomId='';
+let peerStatus='idle';
+let peerConn=null;
+let peerDataConns={};
+let clientGhostId=null;
+let lastPeerSend=0;
 let gameMode='classic'; // classic|survival|timeattack
 let timeLeft=0;
 let mapIndex=0;
@@ -743,44 +752,26 @@ document.addEventListener('keydown',e=>{
   if(ST==='gameover'||ST==='win'){if(e.code==='Space'){ST='title';return;}}
   if(ST==='store'){if(e.code==='Escape'||e.code==='KeyP'){ST='playing';return;}}
   if(ST==='multiplayer'){
-    // Join ghost players by pressing their control keys.
-    GHOST_CONTROL_SETS.forEach((set,i)=>{
-      if([set.up,set.down,set.left,set.right].includes(e.code)){
-        if(!activePlayers[i]){
-          activePlayers[i]=true;
-          if(ghosts[i]) ghosts[i].player=i;
-          showMsg(`${set.label} joined!`);
-        }
-        if(ghosts[i]){
-          ghosts[i].qdr = e.code===set.up?-1: e.code===set.down?1: ghosts[i].qdr;
-          ghosts[i].qdc = e.code===set.left?-1: e.code===set.right?1: ghosts[i].qdc;
-        }
-      }
-    });
-    if(e.code==='Enter'||e.code==='Space'){
-      if(activePlayers.some(v=>v)){
-        multiMode=true;
-        multiplayerRoom=false;
-        ST='playing';
-        buildMaze(mapIndex);
-        resetRound();
-        ghosts.forEach((g,i)=>{g.player=activePlayers[i]?i:null; g.qdr=0; g.qdc=0;});
-        showMsg('Multiplayer ghost match started!');
-      } else {
-        showMsg('Need at least one ghost player to start.');
-      }
-      return;
-    }
     if(e.code==='Escape'){
+      destroyPeer();
       multiplayerRoom=false;
-      multiMode=false;
       ST='title';
+      updateMultiplayerPanel();
       return;
     }
   }
   if(ST==='playing'||ST==='paused'){
     if(e.code==='Escape')  {ST=ST==='store'?'playing':'store';return;}
     if(e.code==='KeyP')    {ST=ST==='paused'?'playing':'paused';pauseMenu.style.display=ST==='paused'?'block':'none';return;}
+  }
+  if(ST==='playing' && multiMode && peerRole==='client'){
+    switch(e.code){
+      case 'ArrowLeft': sendClientCommand(0,-1); break;
+      case 'ArrowRight': sendClientCommand(0,1); break;
+      case 'ArrowUp': sendClientCommand(-1,0); break;
+      case 'ArrowDown': sendClientCommand(1,0); break;
+    }
+    return;
   }
   if(ST==='playing' && !multiMode){
     switch(e.code){
@@ -1026,6 +1017,52 @@ function buyItem(item){
   updateUI();
 }
 
+function makePeer(id){
+  if(peer){ try{peer.destroy();}catch{} peer=null; }
+  peerDataConns={}; peerConn=null;
+  try{ peer = id? new Peer(id) : new Peer(); }
+  catch(err){ showMsg('Peer init failed'); console.error(err); peerStatus='error'; updateUI(); return; }
+  peer.on('open', ()=>{ peerStatus='ready'; updateUI(); });
+  peer.on('error', err=>{ peerStatus='error'; showMsg('Peer error'); console.warn(err); updateUI(); });
+  peer.on('disconnected', ()=>{ peerStatus='disconnected'; updateUI(); });
+  peer.on('close', ()=>{ peerStatus='closed'; updateUI(); });
+  if(peerRole==='host'){
+    peer.on('connection',conn=>{ setupHostConnection(conn); });
+  }
+}
+function destroyPeer(){
+  if(peer){ try{peer.destroy();}catch{} peer=null; }
+  peerRole=null; peerRoomId=''; peerStatus='idle'; peerConn=null; peerDataConns={}; clientGhostId=null;
+}
+function randomRoomCode(){ return Math.random().toString(36).slice(2,6).toUpperCase(); }
+function setupHostConnection(conn){
+  const peerId=conn.peer;
+  peerDataConns[peerId]=conn;
+  peerStatus='connected'; updateUI();
+  conn.on('data', data=>{ if(typeof data==='string'){ try{data=JSON.parse(data);}catch{} } handlePeerMessage(conn,data); });
+  conn.on('close', ()=>{ delete peerDataConns[peerId]; peerStatus=Object.keys(peerDataConns).length?'connected':'waiting'; updateUI(); });
+  conn.on('error', err=>{ console.warn('Peer host conn error',err); });
+  const assigned=[1,2,3].find(id=>!ghosts[id].player);
+  const ghostId=(assigned!=null?assigned:1);
+  if(ghosts[ghostId]){ ghosts[ghostId].player=peerId; ghosts[ghostId].qdr=0; ghosts[ghostId].qdc=0; }
+  conn.on('open', ()=>{ conn.send(JSON.stringify({type:'assign',ghostId:ghostId})); sendPeerStateToConn(conn); });
+}
+function setupClientConnection(conn){
+  peerConn=conn; peerStatus='connected'; updateUI();
+  conn.on('data', data=>{ if(typeof data==='string'){ try{data=JSON.parse(data);}catch{} } handlePeerMessage(conn,data); });
+  conn.on('close', ()=>{ peerStatus='closed'; updateUI(); });
+  conn.on('error', err=>{ console.warn('Peer client conn error',err); });
+}
+function hostRoom(){ destroyPeer(); peerRoomId=randomRoomCode(); peerRole='host'; peerStatus='waiting'; makePeer('room-'+peerRoomId); showMsg(`Room ${peerRoomId} created.`); updateUI(); }
+function joinRoom(code){ if(!code) return; destroyPeer(); peerRoomId=code.toUpperCase(); peerRole='client'; peerStatus='connecting'; makePeer(); if(peer){ peer.on('open', ()=>{ const conn=peer.connect('room-'+peerRoomId); conn.on('open', ()=>setupClientConnection(conn)); conn.on('error', err=>{ peerStatus='error'; showMsg('Join failed'); console.warn(err); updateUI(); }); }); } }
+function handlePeerMessage(conn,data){ if(!data||typeof data!=='object') return; if(data.type==='assign'&&peerRole==='client'){ clientGhostId=data.ghostId; showMsg(`Assigned ghost ${data.ghostId+1}`); } else if(data.type==='state'){ applyPeerState(data); } else if(data.type==='cmd'&&peerRole==='host'){ const g=ghosts[data.ghostId]; if(g){ g.qdr=data.qdr; g.qdc=data.qdc; }} }
+function applyPeerState(data){ if(data.maze){ maze=data.maze.map(row=>row.slice()); } if(!pac){ pac=makePac(); } Object.assign(pac,{x:data.pac.x,y:data.pac.y,dr:data.pac.dr,dc:data.pac.dc,r:data.pac.r,c:data.pac.c,alive:data.pac.alive}); ghosts=data.ghosts.map(g=>({ id:g.id, col:g.col, name:g.name, r:g.r, c:g.c, nr:g.nr, nc:g.nc, dr:g.dr, dc:g.dc, x:g.x, y:g.y, t:g.t, mode:g.mode, penTimer:g.penTimer, fright:g.fright, frightFlash:g.frightFlash, frozen:g.frozen, frozenTTL:g.frozenTTL, eaten:g.eaten, player:g.player!==null?g.player:null, qdr:0, qdc:0 })); if(data.fruit){ fruit={type:data.fruit.type,x:data.fruit.x,y:data.fruit.y}; } else fruit=null; dotsEaten=data.dotsEaten; totalDots=data.totalDots; score=data.score; lives=data.lives; level=data.level; timeLeft=data.timeLeft; mapIndex=data.mapIndex; }
+function sendClientCommand(qdr,qdc){ if(peerRole==='client' && peerConn && clientGhostId!=null){ peerConn.send(JSON.stringify({type:'cmd',ghostId:clientGhostId,qdr,qdc})); }}
+function sendPeerStateToConn(conn){ if(peerRole!=='host'||!conn||!conn.open) return; const state={type:'state', maze:maze, pac:{x:pac.x,y:pac.y,dr:pac.dr,dc:pac.dc,r:pac.r,c:pac.c,alive:pac.alive}, ghosts:ghosts.map(g=>({id:g.id,col:g.col,name:g.name,r:g.r,c:g.c,nr:g.nr,nc:g.nc,dr:g.dr,dc:g.dc,x:g.x,y:g.y,t:g.t,mode:g.mode,penTimer:g.penTimer,fright:g.fright,frightFlash:g.frightFlash,frozen:g.frozen,frozenTTL:g.frozenTTL,eaten:g.eaten,player:g.player})), fruit:fruit?{type:fruit.type,x:fruit.x,y:fruit.y}:null, dotsEaten,totalDots,score,lives,level,timeLeft,mapIndex}; conn.send(JSON.stringify(state)); }
+function broadcastPeerState(){ if(peerRole!=='host') return; Object.values(peerDataConns).forEach(conn=>{ sendPeerStateToConn(conn); }); }
+function createMultiplayerPanel(){ const panel=document.createElement('div'); panel.id='multiplayerPanel'; panel.style.position='absolute'; panel.style.left='50%'; panel.style.top='50%'; panel.style.transform='translate(-50%,-50%)'; panel.style.background='rgba(0,0,0,0.95)'; panel.style.border='2px solid #333'; panel.style.padding='12px'; panel.style.display='none'; panel.style.zIndex=9999; panel.style.textAlign='center'; panel.style.width='260px'; panel.innerHTML=`<div style="color:#FFD700;font-weight:bold;margin-bottom:8px;">MULTIPLAYER LOBBY</div><div style="margin-bottom:8px;font-size:11px;">Host a room to generate a code, or join using a code from another player.</div><div style="margin-bottom:6px;">Room code: <span id="roomCodeDisplay">--</span></div><div style="margin-bottom:6px;">Status: <span id="roomStatusDisplay">idle</span></div><input id="joinCodeInput" placeholder="Enter room code" style="width:100%;margin-bottom:6px;padding:6px;border:1px solid #444;background:#111;color:#fff;" maxlength="6" /><button id="hostRoomBtn" style="display:block;margin:6px auto;padding:6px;width:100%;">Host Room</button><button id="joinRoomBtn" style="display:block;margin:6px auto;padding:6px;width:100%;">Join Room</button><button id="leaveRoomBtn" style="display:block;margin:6px auto;padding:6px;width:100%;">Back to Title</button><div id="roomHelp" style="margin-top:10px;font-size:10px;color:#ccc;">After connecting, remote players control ghosts 2-4.</div>`; document.body.appendChild(panel); document.getElementById('hostRoomBtn').addEventListener('click',()=>{ hostRoom(); updateMultiplayerPanel(); }); document.getElementById('joinRoomBtn').addEventListener('click',()=>{ joinRoom(document.getElementById('joinCodeInput').value); updateMultiplayerPanel(); }); document.getElementById('leaveRoomBtn').addEventListener('click',()=>{ destroyPeer(); ST='title'; multiplayerRoom=false; panel.style.display='none'; updateMultiplayerPanel(); }); }
+function updateMultiplayerPanel(){ const panel=document.getElementById('multiplayerPanel'); if(!panel) return; panel.style.display=multiplayerRoom?'block':'none'; document.getElementById('roomCodeDisplay').textContent=peerRoomId||'--'; document.getElementById('roomStatusDisplay').textContent=peerStatus||'idle'; const help=document.getElementById('roomHelp'); if(peerRole==='client' && clientGhostId!=null){ help.textContent=`You control Ghost ${clientGhostId+1}. Use Arrow keys to send movement.`; } else if(peerRole==='host'){ help.textContent=`Room open. Waiting for joiners. Connected: ${Object.keys(peerDataConns).length}`; } else { help.textContent='After connecting, remote players control ghosts 2-4.'; } }
+
 // ── INTRO ANIMATION ────────────────────────────────────
 const SLIDES=[
   {title:'In a peaceful maze city...',sub:'Pac-Man lived happily eating dots.',col:'#FFD700',bg:'#000011'},
@@ -1043,6 +1080,7 @@ function advIntro(skip){
 
 // ── START GAME ────────────────────────────────────────
 function startGame(){
+  destroyPeer();
   score=0;lives=3;level=1;coins=0;
   AKEYS.forEach(k=>{abTok[k]=0;abLv[k]=1;});
   abQueue=[];abCool=0;lastAb=null;
@@ -1061,13 +1099,11 @@ function startGame(){
 function enterMultiplayerRoom(){
   multiMode=false;
   multiplayerRoom=true;
-  ST='multiplayer';
-  activePlayers=[false,false,false,false];
-  mapIndex=0;
-  buildMaze(mapIndex);
-  ghosts=GNAMES.map((_,i)=>makeGhost(i));
-  ghosts.forEach(g=>{g.player=null; g.qdr=0; g.qdc=0;});
-  showMsg('Press WASD / IJKL / TFGH / Arrow keys to join.');
+  peerRole=null;
+  peerStatus='idle';
+  peerRoomId='';
+  clientGhostId=null;
+  updateMultiplayerPanel();
 }
 
 function drawMultiplayerRoom(){
@@ -1076,27 +1112,16 @@ function drawMultiplayerRoom(){
   drawParticles();
   CX.fillStyle='rgba(0,0,0,.82)'; CX.fillRect(0,0,CV.width,CV.height);
   CX.fillStyle='#FFD700'; CX.font='bold 18px Courier New'; CX.textAlign='center';
-  CX.fillText('MULTIPLAYER ROOM',CV.width/2,42);
+  CX.fillText('MULTIPLAYER LOBBY',CV.width/2,42);
   CX.fillStyle='#fff'; CX.font='8px Courier New';
-  CX.fillText('Up to 4 players can join and control the ghosts.',CV.width/2,60);
-  CX.fillText('Press your control keys to claim a ghost.',CV.width/2,74);
-  CX.fillText('Then press ENTER to start, or ESC to return.',CV.width/2,88);
-  GHOST_CONTROL_SETS.forEach((set,i)=>{
-    const y=118+i*26;
-    CX.fillStyle=activePlayers[i]?'#7CFC00':'#999';
-    CX.font='bold 11px Courier New';
-    CX.fillText(`${set.label}: ${set.name} ${activePlayers[i]?'· JOINED':'· press any key'}`,CV.width/2,y);
-  });
-  ghosts.forEach((g,i)=>{
-    const x=68+i*68, y=CV.height-52;
-    CX.fillStyle=g.col; CX.beginPath();CX.arc(x,y,14,0,Math.PI*2);CX.fill();
-    CX.fillStyle='#fff'; CX.font='7px Courier New'; CX.fillText(g.name,x,y+22);
-  });
-}
-
-// Pause menu DOM overlay
-const pauseMenu=document.createElement('div');
-pauseMenu.id='pauseMenu';
+  CX.fillText('Use the overlay panel to host or join a room.',CV.width/2,60);
+  CX.fillText(`Room code: ${peerRoomId||'----'}`,CV.width/2,80);
+  CX.fillText(`Status: ${peerStatus}`,CV.width/2,96);
+  if(peerRole==='client' && clientGhostId!=null){
+    CX.fillStyle='#7CFC00'; CX.fillText(`CONTROLLING GHOST ${clientGhostId+1}`,CV.width/2,112);
+  }
+  CX.fillStyle='#999'; CX.font='7px Courier New';
+  CX.fillText('Hit ESC to return to title.',CV.width/2,138seMenu.id='pauseMenu';
 pauseMenu.style.position='absolute';
 pauseMenu.style.left='50%';
 pauseMenu.style.top='50%';
@@ -1603,6 +1628,7 @@ function updateUI(){
 let msgTimeout;
 function showMsg(txt){
   // Draw on canvas via overlay variable
+  if(typeof updateMultiplayerPanel==='function') updateMultiplayerPanel();
   activeMsg=txt;activeMsgTTL=2000;
 }
 let activeMsg='',activeMsgTTL=0;
@@ -1666,6 +1692,7 @@ function loop(now){
     projectiles=projectiles.filter(p=>{
       p.x+=p.dc*p.spd;p.y+=p.dr*p.spd;p.ttl-=dt;
       if(isWall(Math.round((p.y-T/2)/T),Math.round((p.x-T/2)/T))) return false;
+    if(peerRole==='host' && Date.now()-lastPeerSend>120){ broadcastPeerState(); lastPeerSend=Date.now(); }
       ghosts.forEach(g=>{if(!g.eaten&&Math.hypot(p.x-g.x,p.y-g.y)<T){ghostEaten(g);}});
       return p.ttl>0;
     });
@@ -1725,3 +1752,4 @@ requestAnimationFrame(t=>{last=t;loop(t);});
 </script>
 </body>
 </html>
+createMultiplayerPanel();
