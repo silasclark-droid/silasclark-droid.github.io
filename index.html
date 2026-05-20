@@ -1067,17 +1067,17 @@ function startMatch(){
   if(playerCount===0){ showMsg('Need at least one player to start.'); return; }
   const pacIndex=Math.floor(Math.random()*playerCount);
   const ghostIds=[1,2,3];
+  let ghostAssigned=false;
   peerIds.forEach((peerId,index)=>{
     if(index===pacIndex){
       peerPlayerRoles[peerId]={role:'pac',ghostId:null};
       peerPacClientId=peerId;
-    } else {
+    } else if(!ghostAssigned){
       const ghostId=ghostIds.shift();
-      if(ghostId!=null){
-        peerPlayerRoles[peerId]={role:'ghost',ghostId};
-      } else {
-        peerPlayerRoles[peerId]={role:'waiting',ghostId:null};
-      }
+      peerPlayerRoles[peerId]={role:'ghost',ghostId};
+      ghostAssigned=true;
+    } else {
+      peerPlayerRoles[peerId]={role:'waiting',ghostId:null};
     }
   });
 
