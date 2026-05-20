@@ -22,6 +22,9 @@ body{background:#000;display:flex;flex-direction:column;align-items:center;justi
 #qrow{display:flex;gap:2px;flex-wrap:wrap;min-height:20px;align-items:center}
 .qab{font-size:13px;border:1px solid #333;border-radius:3px;padding:1px 2px;background:#0a0a0a}
 #upbtn,#storebtn,#multibtn{width:100%;padding:4px;font-size:6px;font-family:inherit;border:1px solid #333;background:#000;color:#555;cursor:pointer;border-radius:3px;margin-bottom:2px}
+#backbtn,#pausebtn{width:100%;padding:4px;font-size:6px;font-family:inherit;border:1px solid #333;background:#000;color:#FFF;cursor:pointer;border-radius:3px;margin-bottom:2px}
+#backbtn{border-color:#66CC66;color:#66FF88;background:#032003}
+#pausebtn{border-color:#CCCC44;color:#FFFF66;background:#201f00}
 #upbtn.on{border-color:#FFD700;color:#FFD700;background:#110e00}
 #storebtn{border-color:#00BFFF;color:#00BFFF;background:#001020;font-size:8px;padding:5px}
 #multibtn{border-color:#FF69B4;color:#FF69B4;background:#140010;font-size:8px;padding:5px}
@@ -43,6 +46,7 @@ body{background:#000;display:flex;flex-direction:column;align-items:center;justi
     <div class="box"><div class="lbl">Lives</div><div id="lr"></div></div>
     <div class="box"><div class="lbl">🪙 Coins</div><div class="sm" id="coins">0</div></div>
     <div class="box"><button id="storebtn">🛒 STORE</button><button id="multibtn">👥 MULTIPLAYER</button></div>
+    <div class="box"><button id="backbtn">↩ Back to Game</button><button id="pausebtn">⏸ Pause</button></div>
   </div>
   <div id="cvwrap"><canvas id="gc"></canvas></div>
   <div id="right">
@@ -333,6 +337,15 @@ let parts=[], projectiles=[];
 let activeEff=null;
 let deathTick=0, lvTick=0, lvFlash=false;
 let baseSpd=1.9, ghostBaseSpd=1.9;
+
+// Set difficulty (speed) based on level. Easier scaling for early levels.
+function setDifficulty(lv){
+  // base values tuned lower so early levels are easier
+  baseSpd = 1.6 + Math.max(0, lv-1) * 0.02;
+  ghostBaseSpd = 1.6 + Math.max(0, lv-1) * 0.03;
+  // Make level 2 a little easier
+  if(lv===2){ ghostBaseSpd *= 0.9; baseSpd *= 0.98; }
+}
 let introSlide=0, introTimer=0;
 let bossHP=0, bossMaxHP=0, bossFright=false, bossFrightTimer=0;
 let multiMode=false; // multiplayer active flag
@@ -1043,6 +1056,32 @@ function drawMultiplayerRoom(){
     CX.fillStyle='#fff'; CX.font='7px Courier New'; CX.fillText(g.name,x,y+22);
   });
 }
+
+// Pause menu DOM overlay
+const pauseMenu=document.createElement('div');
+pauseMenu.id='pauseMenu';
+pauseMenu.style.position='absolute';
+pauseMenu.style.left='50%';
+pauseMenu.style.top='50%';
+pauseMenu.style.transform='translate(-50%,-50%)';
+pauseMenu.style.background='rgba(0,0,0,0.85)';
+pauseMenu.style.border='2px solid #333';
+pauseMenu.style.padding='12px';
+pauseMenu.style.display='none';
+pauseMenu.style.zIndex=9999;
+pauseMenu.style.textAlign='center';
+pauseMenu.innerHTML=`<div style="color:#FFD700;font-weight:bold;margin-bottom:8px;">PAUSED</div>
+  <button id="resumeBtn" style="display:block;margin:6px;padding:6px;width:160px">Resume</button>
+  <button id="pauseStoreBtn" style="display:block;margin:6px;padding:6px;width:160px">Store</button>
+  <button id="pauseBackBtn" style="display:block;margin:6px;padding:6px;width:160px">Back to Game</button>`;
+document.body.appendChild(pauseMenu);
+document.getElementById('resumeBtn').addEventListener('click',()=>{pauseMenu.style.display='none';ST='playing';});
+document.getElementById('pauseStoreBtn').addEventListener('click',()=>{pauseMenu.style.display='none';ST='store';});
+document.getElementById('pauseBackBtn').addEventListener('click',()=>{pauseMenu.style.display='none';ST='playing';multiplayerRoom=false;multiMode=false;});
+
+// Back and Pause button handlers
+document.getElementById('backbtn').addEventListener('click',()=>{ if(ST==='store'||ST==='multiplayer'||ST==='paused'){ ST='playing'; multiplayerRoom=false; multiMode=false; pauseMenu.style.display='none'; } });
+document.getElementById('pausebtn').addEventListener('click',()=>{ if(ST==='paused'){ ST='playing'; pauseMenu.style.display='none'; } else { ST='paused'; pauseMenu.style.display='block'; } });
 
 // ── DRAWING ───────────────────────────────────────────
 function drawMaze(){
