@@ -75,7 +75,15 @@ body{background:#000;display:flex;flex-direction:column;align-items:center;justi
 const CV = document.getElementById('gc');
 const CX = CV.getContext('2d');
 const T = 16, NC = 28, NR = 31;
-CV.width = NC*T; CV.height = NR*T;
+const baseW = NC * T, baseH = NR * T;
+let mapScale = 1;
+CV.width = baseW; CV.height = baseH;
+CV.style.width = baseW + 'px'; CV.style.height = baseH + 'px';
+function updateMapScale(){
+  mapScale = 1 + Math.min(0.7, (level-1)*0.04);
+  CV.style.width = baseW * mapScale + 'px';
+  CV.style.height = baseH * mapScale + 'px';
+}
 
 // ── 4 MAZE LAYOUTS ────────────────────────────────────
 // 0=open 1=wall 2=dot 3=power-pellet P=pen-open
@@ -236,6 +244,10 @@ function buildMaze(mi){
       maze[r][NC-1-c]=maze[r][c];
     }
   }
+  // Turn corner dots into power pellets if open
+  [[1,1],[1,26],[29,1],[29,26]].forEach(([r,c])=>{
+    if(maze[r][c]===2) maze[r][c]=3;
+  });
   // Force power pellets at corners if none in parsed
   totalDots=0; dotsEaten=0;
   for(let r=0;r<NR;r++) for(let c=0;c<NC;c++)
@@ -628,6 +640,7 @@ function stepGhost(g, dt){
 function ghostTarget(g){
   const pr=pac.r, pc=pac.c;
   if(g.mode==='eaten') return{r:14,c:14};
+  if(g.magnet) return {r:pr,c:pc};
   if(g.fright) return{r:((Math.random()*NR)|0),c:((Math.random()*NC)|0)};
   if(g.mode==='scatter') return [{r:1,c:26},{r:1,c:1},{r:29,c:26},{r:29,c:1}][g.id%4];
   switch(g.id%4){
@@ -648,10 +661,10 @@ function makeBoss(bossNum){
     x:14*T+T/2, y:14*T+T/2,
     r:14,c:14,nr:14,nc:14,
     dr:0,dc:0,t:0,
-    hp: 3+bossNum,
-    maxHP: 3+bossNum,
-    spd: ghostBaseSpd*(1.5+bossNum*0.3),
-    size: 1.3+bossNum*0.12,
+    hp: 5 + bossNum*3,
+    maxHP: 5 + bossNum*3,
+    spd: ghostBaseSpd*(1.7+bossNum*0.35),
+    size: 1.3+bossNum*0.14,
     col:`hsl(${bossNum*40},100%,55%)`,
     mode:'chase',fright:false,dead:false,
     flashTimer:0,
@@ -767,7 +780,7 @@ document.addEventListener('keydown',e=>{
   }
   if(ST==='playing'||ST==='paused'){
     if(e.code==='Escape')  {ST=ST==='store'?'playing':'store';return;}
-    if(e.code==='KeyP')    {ST=ST==='paused'?'playing':'paused';return;}
+    if(e.code==='KeyP')    {ST=ST==='paused'?'playing':'paused';pauseMenu.style.display=ST==='paused'?'block':'none';return;}
   }
   if(ST==='playing' && !multiMode){
     switch(e.code){
@@ -775,6 +788,10 @@ document.addEventListener('keydown',e=>{
       case 'ArrowRight': pac.qr=0;pac.qc=1; pac.qBuf=18;break;
       case 'ArrowUp':    pac.qr=-1;pac.qc=0;pac.qBuf=18;break;
       case 'ArrowDown':  pac.qr=1; pac.qc=0;pac.qBuf=18;break;
+      case 'KeyW': if(owned.fireball){fireballAim={dr:-1,dc:0};showMsg('Fireball aimed up');} break;
+      case 'KeyS': if(owned.fireball){fireballAim={dr:1,dc:0};showMsg('Fireball aimed down');} break;
+      case 'KeyA': if(owned.fireball){fireballAim={dr:0,dc:-1};showMsg('Fireball aimed left');} break;
+      case 'KeyD': if(owned.fireball){fireballAim={dr:0,dc:1};showMsg('Fireball aimed right');} break;
       case 'Space':
       case 'Enter': if(abQueue.length&&abCool<=0)useAbility();break;
     }
@@ -884,18 +901,18 @@ function doSpeed(lv){
   setTimeout(()=>speedOn=false,speedTTL);
 }
 function doFireball(){
-  // Shoot in current direction
-  if(pac.dr===0&&pac.dc===0) return;
-  projectiles.push({x:pac.x,y:pac.y,dr:pac.dr,dc:pac.dc,ttl:2000,col:'#FF6600',spd:4});
+  const dr = fireballAim.dr || pac.dr;
+  const dc = fireballAim.dc || pac.dc;
+  if(dr===0&&dc===0) return;
+  projectiles.push({x:pac.x,y:pac.y,dr,dc,ttl:2000,col:'#FF6600',spd:4});
 }
 function doMagnet(lv){
   const dur=DEFS.magnet.dur[lv];
   ghosts.forEach(g=>{
     if(!g.eaten&&g.mode!=='pen'){
-      g.fright=true; g.mode='fright';
-      // Pull toward pac
-      g.r=pac.r;g.c=pac.c;g.nr=pac.r;g.nc=pac.c;
-      g.x=pac.x;g.y=pac.y;g.t=0;
+      g.magnet=true;
+      g.fright=true;
+      g.mode='fright';
     }
   });
   boom(pac.x,pac.y,'#EE44FF',30);
@@ -949,8 +966,8 @@ function nextAfterBoss(){
   boss=null; bossFright=false;
   level++;
   if(level%5===0) mapIndex=Math.floor(level/5)%4;
-  ghostBaseSpd=1.9+(level-1)*0.06;
-  baseSpd=1.9+(level-1)*0.03;
+  setDifficulty(level);
+  updateMapScale();
   buildMaze(mapIndex);
   resetRound();
   ST='playing';
@@ -975,6 +992,8 @@ function resetRound(){
       else g.player=null;
     });
   }
+  setDifficulty(level);
+  updateMapScale();
   frightLeft=0;eatMul=1;
   shieldOn=false;speedOn=false;activeEff=null;
   projectiles=[];
@@ -985,8 +1004,25 @@ function buyItem(item){
   if(coins<item.cost) return;
   if(owned[item.id]>=item.max) return;
   coins-=item.cost; owned[item.id]++;
+  if(item.id==='extra_life'){
+    lives++;
+    showMsg(`+1 life!`);
+  }
+  if(item.id==='double_pts'){
+    doublePoints=true;
+    showMsg(`Double points active this level!`);
+  }
+  if(item.id==='fireball'){
+    fireballAim={dr:0,dc:1};
+    showMsg(`Fireball unlocked! Aim with WASD.`);
+  }
+  if(item.id==='magnet'){
+    showMsg(`Ghost magnet unlocked!`);
+  }
+  if(item.type==='map'){
+    showMsg(`${item.name} unlocked!`);
+  }
   boom(CV.width/2,CV.height/2,'#FFD700',30);
-  showMsg(`✅ ${item.name} purchased!`);
   updateUI();
 }
 
@@ -1012,8 +1048,9 @@ function startGame(){
   abQueue=[];abCool=0;lastAb=null;
   parts=[];projectiles=[];boss=null;
   mapIndex=0;
-  baseSpd=1.9;ghostBaseSpd=1.9;
   doublePoints=false;
+  setDifficulty(level);
+  updateMapScale();
   buildMaze(0);
   resetRound();
   p2Score=0;
