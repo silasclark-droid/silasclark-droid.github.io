@@ -377,7 +377,10 @@ let peerRoomId='';
 let peerStatus='idle';
 let peerConn=null;
 let peerDataConns={};
+let peerPlayerRoles={};
+let peerPacClientId=null;
 let peerGhostMap={};
+let clientRole=null;
 let clientGhostId=null;
 let lastPeerSend=0;
 let gameMode='classic'; // classic|survival|timeattack
@@ -1033,27 +1036,23 @@ function makePeer(id){
 }
 function destroyPeer(){
   if(peer){ try{peer.destroy();}catch{} peer=null; }
-  peerRole=null; peerRoomId=''; peerStatus='idle'; peerConn=null; peerDataConns={}; peerGhostMap={}; clientGhostId=null;
+  peerRole=null; peerRoomId=''; peerStatus='idle'; peerConn=null; peerDataConns={}; peerPlayerRoles={}; peerPacClientId=null; peerGhostMap={}; clientRole=null; clientGhostId=null;
 }
 function randomRoomCode(){ return Math.random().toString(36).slice(2,6).toUpperCase(); }
 function setupHostConnection(conn){
   const peerId=conn.peer;
   peerDataConns[peerId]=conn;
-  peerStatus='connected'; updateUI();
+  peerPlayerRoles[peerId]={role:'waiting',ghostId:null};
+  peerPacClientId=null;
+  peerStatus='connected'; updateUI(); updateMultiplayerPanel();
   conn.on('data', data=>{ if(typeof data==='string'){ try{data=JSON.parse(data);}catch{} } handlePeerMessage(conn,data); });
   conn.on('close', ()=>{
-    const ghostId=peerGhostMap[peerId];
-    if(ghostId!=null && ghosts[ghostId]){ ghosts[ghostId].player=null; }
-    delete peerGhostMap[peerId];
+    delete peerPlayerRoles[peerId];
     delete peerDataConns[peerId];
-    peerStatus=Object.keys(peerDataConns).length?'connected':'waiting'; updateUI();
+    peerStatus=Object.keys(peerDataConns).length?'connected':'waiting'; updateUI(); updateMultiplayerPanel();
   });
   conn.on('error', err=>{ console.warn('Peer host conn error',err); });
-  const assigned=[1,2,3].find(id=>!ghosts[id].player && !Object.values(peerGhostMap).includes(id));
-  const ghostId=(assigned!=null?assigned:1);
-  peerGhostMap[peerId]=ghostId;
-  if(ghosts[ghostId]){ ghosts[ghostId].player=ghostId; ghosts[ghostId].qdr=0; ghosts[ghostId].qdc=0; }
-  conn.on('open', ()=>{ conn.send(JSON.stringify({type:'assign',ghostId:ghostId})); sendPeerStateToConn(conn); updateMultiplayerPanel(); });
+  conn.on('open', ()=>{ sendPeerStateToConn(conn); updateMultiplayerPanel(); });
 }
 function setupClientConnection(conn){
   peerConn=conn; peerStatus='connected'; updateUI(); updateMultiplayerPanel();
@@ -1061,17 +1060,108 @@ function setupClientConnection(conn){
   conn.on('close', ()=>{ peerStatus='closed'; updateUI(); updateMultiplayerPanel(); });
   conn.on('error', err=>{ console.warn('Peer client conn error',err); updateMultiplayerPanel(); });
 }
-function startMatch(){ if(peerRole!=='host') return; const playerCount=Object.keys(peerDataConns).length; if(playerCount===0){ showMsg('Need at least one player to start.'); return; } multiMode=true; multiplayerRoom=false; ST='playing'; activePlayers=ghosts.map(g=>g.player!==null); resetRound(); updateUI(); Object.values(peerDataConns).forEach(conn=>{ sendPeerStateToConn(conn); conn.send(JSON.stringify({type:'start'})); }); showMsg('Multiplayer match started!'); }
+function startMatch(){
+  if(peerRole!=='host') return;
+  const peerIds=Object.keys(peerDataConns);
+  const playerCount=peerIds.length;
+  if(playerCount===0){ showMsg('Need at least one player to start.'); return; }
+  const pacIndex=Math.floor(Math.random()*playerCount);
+  const ghostIds=[1,2,3];
+  peerIds.forEach((peerId,index)=>{
+    if(index===pacIndex){
+      peerPlayerRoles[peerId]={role:'pac',ghostId:null};
+      peerPacClientId=peerId;
+    } else {
+      const ghostId=ghostIds.shift();
+      if(ghostId!=null){
+        peerPlayerRoles[peerId]={role:'ghost',ghostId};
+      } else {
+        peerPlayerRoles[peerId]={role:'waiting',ghostId:null};
+      }
+    }
+  });
+
+  multiMode=true;
+  multiplayerRoom=false;
+  ST='playing';
+  activePlayers=[false,false,false,false];
+  peerIds.forEach(peerId=>{
+    const roleInfo=peerPlayerRoles[peerId];
+    if(roleInfo.role==='ghost' && roleInfo.ghostId!=null){ activePlayers[roleInfo.ghostId]=true; }
+  });
+  resetRound();
+  updateUI();
+
+  Object.entries(peerDataConns).forEach(([peerId,conn])=>{
+    const roleInfo=peerPlayerRoles[peerId]||{role:'waiting'};
+    if(conn.open){
+      sendPeerStateToConn(conn);
+      conn.send(JSON.stringify({type:'assign',role:roleInfo.role,ghostId:roleInfo.ghostId}));
+      conn.send(JSON.stringify({type:'start'}));
+    }
+  });
+  showMsg('Multiplayer match started!');
+}
 function startMultiplayerClient(){ multiMode=true; multiplayerRoom=false; ST='playing'; updateUI(); showMsg('Joined room. Match started.'); }
-function handlePeerMessage(conn,data){ if(!data||typeof data!=='object') return; if(data.type==='assign'&&peerRole==='client'){ clientGhostId=data.ghostId; showMsg(`Assigned ghost ${data.ghostId+1}`); } else if(data.type==='state'){ applyPeerState(data); } else if(data.type==='cmd'&&peerRole==='host'){ const g=ghosts[data.ghostId]; if(g){ g.qdr=data.qdr; g.qdc=data.qdc; }} else if(data.type==='start'&&peerRole==='client'){ startMultiplayerClient(); }}
+function handlePeerMessage(conn,data){
+  if(!data||typeof data!=='object') return;
+  if(data.type==='assign'&&peerRole==='client'){
+    clientRole=data.role||'waiting';
+    clientGhostId=data.ghostId!=null?data.ghostId:null;
+    if(clientRole==='pac'){ showMsg('You are Pac-Man!'); }
+    else if(clientRole==='ghost'){ showMsg(`You control Ghost ${clientGhostId+1}`); }
+    else { showMsg('Waiting for host to start...'); }
+    updateMultiplayerPanel();
+  } else if(data.type==='state'){ applyPeerState(data); }
+  else if(data.type==='cmd'&&peerRole==='host'){
+    if(data.role==='pac'){
+      pac.qr=data.dr; pac.qc=data.dc; pac.qBuf=18;
+    } else if(data.role==='ghost'){
+      const g=ghosts[data.ghostId]; if(g){ g.qdr=data.dr; g.qdc=data.dc; }
+    }
+  } else if(data.type==='start'&&peerRole==='client'){
+    startMultiplayerClient();
+  }
+}
 function hostRoom(){ destroyPeer(); peerRoomId=randomRoomCode(); peerRole='host'; peerStatus='waiting'; makePeer('room-'+peerRoomId); showMsg(`Room ${peerRoomId} created.`); updateUI(); }
 function joinRoom(code){ if(!code) return; destroyPeer(); peerRoomId=code.toUpperCase(); peerRole='client'; peerStatus='connecting'; makePeer(); if(peer){ peer.on('open', ()=>{ const conn=peer.connect('room-'+peerRoomId); conn.on('open', ()=>setupClientConnection(conn)); conn.on('error', err=>{ peerStatus='error'; showMsg('Join failed'); console.warn(err); updateUI(); }); }); } }
 function applyPeerState(data){ if(data.maze){ maze=data.maze.map(row=>row.slice()); } if(!pac){ pac=makePac(); } Object.assign(pac,{x:data.pac.x,y:data.pac.y,dr:data.pac.dr,dc:data.pac.dc,r:data.pac.r,c:data.pac.c,alive:data.pac.alive}); ghosts=data.ghosts.map(g=>({ id:g.id, col:g.col, name:g.name, r:g.r, c:g.c, nr:g.nr, nc:g.nc, dr:g.dr, dc:g.dc, x:g.x, y:g.y, t:g.t, mode:g.mode, penTimer:g.penTimer, fright:g.fright, frightFlash:g.frightFlash, frozen:g.frozen, frozenTTL:g.frozenTTL, eaten:g.eaten, player:g.player!==null?g.player:null, qdr:0, qdc:0 })); if(data.fruit){ fruit={type:data.fruit.type,x:data.fruit.x,y:data.fruit.y}; } else fruit=null; dotsEaten=data.dotsEaten; totalDots=data.totalDots; score=data.score; lives=data.lives; level=data.level; timeLeft=data.timeLeft; mapIndex=data.mapIndex; }
-function sendClientCommand(qdr,qdc){ if(peerRole==='client' && peerConn && clientGhostId!=null){ peerConn.send(JSON.stringify({type:'cmd',ghostId:clientGhostId,qdr,qdc})); }}
+function sendClientCommand(dr,dc){
+  if(peerRole!=='client' || !peerConn || !clientRole) return;
+  const msg={type:'cmd',role:clientRole,dr,dc};
+  if(clientRole==='ghost'){ msg.ghostId=clientGhostId; }
+  peerConn.send(JSON.stringify(msg));
+}
 function sendPeerStateToConn(conn){ if(peerRole!=='host'||!conn||!conn.open) return; const state={type:'state', maze:maze, pac:{x:pac.x,y:pac.y,dr:pac.dr,dc:pac.dc,r:pac.r,c:pac.c,alive:pac.alive}, ghosts:ghosts.map(g=>({id:g.id,col:g.col,name:g.name,r:g.r,c:g.c,nr:g.nr,nc:g.nc,dr:g.dr,dc:g.dc,x:g.x,y:g.y,t:g.t,mode:g.mode,penTimer:g.penTimer,fright:g.fright,frightFlash:g.frightFlash,frozen:g.frozen,frozenTTL:g.frozenTTL,eaten:g.eaten,player:g.player})), fruit:fruit?{type:fruit.type,x:fruit.x,y:fruit.y}:null, dotsEaten,totalDots,score,lives,level,timeLeft,mapIndex}; conn.send(JSON.stringify(state)); }
 function broadcastPeerState(){ if(peerRole!=='host') return; Object.values(peerDataConns).forEach(conn=>{ sendPeerStateToConn(conn); }); }
 function createMultiplayerPanel(){ const panel=document.createElement('div'); panel.id='multiplayerPanel'; panel.style.position='absolute'; panel.style.left='50%'; panel.style.top='50%'; panel.style.transform='translate(-50%,-50%)'; panel.style.background='rgba(0,0,0,0.95)'; panel.style.border='2px solid #333'; panel.style.padding='12px'; panel.style.display='none'; panel.style.zIndex=9999; panel.style.textAlign='center'; panel.style.width='280px'; panel.innerHTML=`<div style="color:#FFD700;font-weight:bold;margin-bottom:8px;">MULTIPLAYER LOBBY</div><div style="margin-bottom:8px;font-size:11px;">Enter a host code to join an active room, or create your own room below.</div><input id="joinCodeInput" placeholder="Enter host code" style="width:100%;margin-bottom:6px;padding:6px;border:1px solid #444;background:#111;color:#fff;" maxlength="6" /><button id="joinRoomBtn" style="display:block;margin:4px auto;padding:8px;width:100%;background:#222;border:1px solid #666;color:#fff;">Join Room</button><div style="margin:8px 0 4px;font-size:11px;color:#aaa;">or create a new room</div><button id="hostRoomBtn" style="display:block;margin:4px auto;padding:8px;width:100%;background:#33001a;border:1px solid #FF69B4;color:#FF69B4;">Create Room</button><button id="startMatchBtn" style="display:none;margin:4px auto;padding:8px;width:100%;background:#226633;border:1px solid #55CC88;color:#fff;">Start Match</button><button id="leaveRoomBtn" style="display:block;margin:8px auto;padding:6px;width:100%;">Back to Title</button><div id="roomHelp" style="margin-top:10px;font-size:10px;color:#ccc;">Room code will appear here once you host one.</div><div style="margin-top:6px;font-size:10px;color:#ccc;">Current room: <span id="roomCodeDisplay">--</span> · Status: <span id="roomStatusDisplay">idle</span></div>`; document.body.appendChild(panel); document.getElementById('hostRoomBtn').addEventListener('click',()=>{ hostRoom(); updateMultiplayerPanel(); }); document.getElementById('joinRoomBtn').addEventListener('click',()=>{ joinRoom(document.getElementById('joinCodeInput').value); updateMultiplayerPanel(); }); document.getElementById('startMatchBtn').addEventListener('click',()=>{ startMatch(); updateMultiplayerPanel(); }); document.getElementById('leaveRoomBtn').addEventListener('click',()=>{ destroyPeer(); ST='title'; multiplayerRoom=false; panel.style.display='none'; updateMultiplayerPanel(); }); }
-function updateMultiplayerPanel(){ const panel=document.getElementById('multiplayerPanel'); if(!panel) return; panel.style.display=multiplayerRoom?'block':'none'; document.getElementById('roomCodeDisplay').textContent=peerRoomId||'--'; document.getElementById('roomStatusDisplay').textContent=peerStatus||'idle'; const help=document.getElementById('roomHelp'); const startBtn=document.getElementById('startMatchBtn'); if(peerRole==='client' && clientGhostId!=null){ help.textContent=`You control Ghost ${clientGhostId+1}. Wait for host to start.`; startBtn.style.display='none'; } else if(peerRole==='host'){ const connected=Object.keys(peerDataConns).length; help.textContent=`Room open. Waiting for joiners. Connected: ${connected}`; startBtn.style.display='block'; startBtn.disabled=connected===0; startBtn.textContent=connected===0?'Waiting for players...':'Start Match'; } else { help.textContent='After connecting, remote players control ghosts 2-4.'; startBtn.style.display='none'; } }
+function updateMultiplayerPanel(){
+  const panel=document.getElementById('multiplayerPanel'); if(!panel) return;
+  panel.style.display=multiplayerRoom?'block':'none';
+  document.getElementById('roomCodeDisplay').textContent=peerRoomId||'--';
+  document.getElementById('roomStatusDisplay').textContent=peerStatus||'idle';
+  const help=document.getElementById('roomHelp');
+  const startBtn=document.getElementById('startMatchBtn');
+  if(peerRole==='client'){
+    if(clientRole==='pac'){
+      help.textContent='You are Pac-Man. Use arrows to move and eat ghosts when powered.';
+    } else if(clientRole==='ghost'){
+      help.textContent=`You control Ghost ${clientGhostId+1}. Wait for host to start.`;
+    } else {
+      help.textContent='Waiting for host to choose roles and start the match.';
+    }
+    startBtn.style.display='none';
+  } else if(peerRole==='host'){
+    const connected=Object.keys(peerDataConns).length;
+    help.textContent=`Room open. Waiting for joiners. Connected: ${connected}`;
+    startBtn.style.display='block';
+    startBtn.disabled=connected===0;
+    startBtn.textContent=connected===0?'Waiting for players...':'Start Match';
+  } else {
+    help.textContent='After connecting, remote players control Pac-Man or ghosts.';
+    startBtn.style.display='none';
+  }
+}
 
 // ── INTRO ANIMATION ────────────────────────────────────
 const SLIDES=[
@@ -1127,8 +1217,12 @@ function drawMultiplayerRoom(){
   CX.fillText('Use the overlay panel to host or join a room.',CV.width/2,60);
   CX.fillText(`Room code: ${peerRoomId||'----'}`,CV.width/2,80);
   CX.fillText(`Status: ${peerStatus}`,CV.width/2,96);
-  if(peerRole==='client' && clientGhostId!=null){
-    CX.fillStyle='#7CFC00'; CX.fillText(`CONTROLLING GHOST ${clientGhostId+1}`,CV.width/2,112);
+  if(peerRole==='client'){
+    if(clientRole==='pac'){
+      CX.fillStyle='#7CFC00'; CX.fillText('CONTROLLING PAC-MAN',CV.width/2,112);
+    } else if(clientRole==='ghost' && clientGhostId!=null){
+      CX.fillStyle='#7CFC00'; CX.fillText(`CONTROLLING GHOST ${clientGhostId+1}`,CV.width/2,112);
+    }
   }
   CX.fillStyle='#999'; CX.font='7px Courier New';
   CX.fillText('Hit ESC to return to title.',CV.width/2,138);
@@ -1706,10 +1800,11 @@ function loop(now){
     projectiles=projectiles.filter(p=>{
       p.x+=p.dc*p.spd;p.y+=p.dr*p.spd;p.ttl-=dt;
       if(isWall(Math.round((p.y-T/2)/T),Math.round((p.x-T/2)/T))) return false;
-    if(peerRole==='host' && Date.now()-lastPeerSend>120){ broadcastPeerState(); lastPeerSend=Date.now(); }
       ghosts.forEach(g=>{if(!g.eaten&&Math.hypot(p.x-g.x,p.y-g.y)<T){ghostEaten(g);}});
       return p.ttl>0;
     });
+
+    if(peerRole==='host' && Date.now()-lastPeerSend>120){ broadcastPeerState(); lastPeerSend=Date.now(); }
 
     tickP(dt);
     updateUI();
