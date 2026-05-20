@@ -244,6 +244,35 @@ function buildMaze(mi){
     for(let r=0;r<NR;r++) for(let c=0;c<NC;c++)
       if(maze[r][c]===2||maze[r][c]===3) totalDots++;
   }
+  // Remove unreachable dots so every level can be completed.
+  const startR=23, startC=14;
+  const reachable=new Uint8Array(NR*NC);
+  const queue=[{r:startR,c:startC}];
+  reachable[startR*NC+startC]=1;
+  while(queue.length){
+    const {r,c}=queue.shift();
+    const dirs=[{dr:-1,dc:0},{dr:1,dc:0},{dr:0,dc:-1},{dr:0,dc:1}];
+    for(const d of dirs){
+      const nr=r+d.dr, nc=((c+d.dc)+NC)%NC;
+      if(nr<0||nr>=NR) continue;
+      if(isWall(nr,nc)) continue;
+      const idx=nr*NC+nc;
+      if(reachable[idx]) continue;
+      reachable[idx]=1;
+      queue.push({r:nr,c:nc});
+    }
+  }
+  for(let r=0;r<NR;r++){
+    for(let c=0;c<NC;c++){
+      const idx=r*NC+c;
+      if(!reachable[idx] && (maze[r][c]===2 || maze[r][c]===3)){
+        maze[r][c]=0;
+      }
+    }
+  }
+  totalDots=0;
+  for(let r=0;r<NR;r++) for(let c=0;c<NC;c++)
+    if(maze[r][c]===2||maze[r][c]===3) totalDots++;
 }
 
 function isWall(r,c){
