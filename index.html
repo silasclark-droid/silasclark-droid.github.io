@@ -58,7 +58,7 @@ body{background:#000;display:flex;flex-direction:column;align-items:center;justi
     <div class="box"><button id="upbtn">⬆ UPGRADE (3 tokens)</button></div>
     <div class="box"><div class="lbl">Tokens</div><div id="toklist"></div></div>
     <div class="box" style="font-size:5px;color:#333;line-height:2">
-      ← ↑ → ↓ : Move<br>SPACE/ENTER : Power<br>P : Pause<br>ESC : Store<br>[Multi] WASD = P2 Ghost
+      ← ↑ → ↓ : Move<br>SPACE/ENTER : Power<br>P : Pause<br>ESC : Store<br>Multi: WASD / IJKL / TFGH / ARROWS = Ghosts<br>Click MULTIPLAYER ROOM to join
     </div>
   </div>
 </div>
@@ -226,6 +226,12 @@ let maze=[], totalDots=0, dotsEaten=0;
 function buildMaze(mi){
   const src=M[mi%4];
   maze=parseMaze(src);
+  // Mirror the left half to the right so the maze is fully symmetric
+  for(let r=0;r<NR;r++){
+    for(let c=0;c<NC/2;c++){
+      maze[r][NC-1-c]=maze[r][c];
+    }
+  }
   // Force power pellets at corners if none in parsed
   totalDots=0; dotsEaten=0;
   for(let r=0;r<NR;r++) for(let c=0;c<NC;c++)
@@ -300,8 +306,15 @@ let deathTick=0, lvTick=0, lvFlash=false;
 let baseSpd=1.9, ghostBaseSpd=1.9;
 let introSlide=0, introTimer=0;
 let bossHP=0, bossMaxHP=0, bossFright=false, bossFrightTimer=0;
-let multiMode=false; // multiplayer flag
-let p2Ghost=null; // player-2 controlled ghost index
+let multiMode=false; // multiplayer active flag
+let multiplayerRoom=false; // lobby room active
+let activePlayers=[false,false,false,false];
+const GHOST_CONTROL_SETS=[
+  {name:'WASD',up:'KeyW',down:'KeyS',left:'KeyA',right:'KeyD',label:'Ghost 1'},
+  {name:'IJKL',up:'KeyI',down:'KeyK',left:'KeyJ',right:'KeyL',label:'Ghost 2'},
+  {name:'TFGH',up:'KeyT',down:'KeyG',left:'KeyF',right:'KeyH',label:'Ghost 3'},
+  {name:'ARROWS',up:'ArrowUp',down:'ArrowDown',left:'ArrowLeft',right:'ArrowRight',label:'Ghost 4'}
+];
 let p2Score=0;
 let gameMode='classic'; // classic|survival|timeattack
 let timeLeft=0;
@@ -493,12 +506,13 @@ function makeGhost(id){
     fright:false, frightFlash:false,
     frozen:false, frozenTTL:0,
     eaten:false,
-    p2:false           // controlled by player 2?
+    player:null,        // local player index controlling this ghost
+    qdr:0, qdc:0
   };
 }
 
 function stepGhost(g, dt){
-  if(g.p2) return; // P2 handles movement separately
+  if(g.player!==null) return; // player-controlled ghosts move in stepPlayerGhosts
 
   if(g.frozen){g.frozenTTL-=dt;if(g.frozenTTL<=0)g.frozen=false;return;}
 
@@ -636,42 +650,31 @@ function stepBoss(dt){
   boss.y=boss.r*T+T/2+(boss.nr-boss.r)*T*boss.t;
 }
 
-// ── PLAYER 2 (multiplayer ghost) ──────────────────────
+// ── PLAYER GHOST CONTROL (multiplayer room) ──────────
 const P2K={};
-document.addEventListener('keydown',e=>{
-  P2K[e.code]=true;
-  if(multiMode&&p2Ghost!=null&&ST==='playing'){
-    const g=ghosts[p2Ghost];
-    if(e.code==='KeyW'){g.qdr=-1;g.qdc=0;}
-    if(e.code==='KeyS'){g.qdr=1; g.qdc=0;}
-    if(e.code==='KeyA'){g.qdr=0; g.qdc=-1;}
-    if(e.code==='KeyD'){g.qdr=0; g.qdc=1;}
-  }
-});
+document.addEventListener('keydown',e=>{ P2K[e.code]=true; });
 document.addEventListener('keyup',e=>delete P2K[e.code]);
 
-function stepP2Ghost(dt){
-  if(!multiMode||p2Ghost==null) return;
-  const g=ghosts[p2Ghost];
-  if(!g||g.mode==='pen') return;
-  if(!g.qdr&&!g.qdc) return;
-
-  const spd=ghostBaseSpd*(g.fright?0.5:1.2);
-  const tileR=Math.round((g.y-T/2)/T), tileC=((Math.round((g.x-T/2)/T))%NC+NC)%NC;
-  const midX=tileC*T+T/2, midY=tileR*T+T/2;
-
-  if(Math.abs(g.x-midX)<spd+2&&Math.abs(g.y-midY)<spd+2){
-    const ndr=g.qdr||0,ndc=g.qdc||0;
-    if(!isWall(tileR+ndr,tileC+ndc)){
-      g.dr=ndr;g.dc=ndc;g.x=midX;g.y=midY;
+function stepPlayerGhosts(dt){
+  if(!multiMode) return;
+  ghosts.forEach(g=>{
+    if(g.player===null||g.mode==='pen') return;
+    if(!g.qdr&&!g.qdc) return;
+    const spd=ghostBaseSpd*(g.fright?0.5:1.2);
+    const tileR=Math.round((g.y-T/2)/T), tileC=((Math.round((g.x-T/2)/T))%NC+NC)%NC;
+    const midX=tileC*T+T/2, midY=tileR*T+T/2;
+    if(Math.abs(g.x-midX)<spd+2&&Math.abs(g.y-midY)<spd+2){
+      const ndr=g.qdr||0, ndc=g.qdc||0;
+      if(!isWall(tileR+ndr,tileC+ndc)){
+        g.dr=ndr; g.dc=ndc; g.x=midX; g.y=midY;
+      }
     }
-  }
-  const nx2=g.x+g.dc*spd, ny2=g.y+g.dr*spd;
-  const tc2=Math.round((ny2-T/2)/T), tc3=((Math.round((nx2-T/2)/T))%NC+NC)%NC;
-  if(!isWall(tc2,tc3)){g.x=nx2;g.y=ny2;}
-  g.r=Math.round((g.y-T/2)/T);g.c=((Math.round((g.x-T/2)/T))%NC+NC)%NC;
-  // Tunnel wrap
-  if(g.x<0)g.x=NC*T;if(g.x>NC*T)g.x=0;
+    const nx2=g.x+g.dc*spd, ny2=g.y+g.dr*spd;
+    const tc2=Math.round((ny2-T/2)/T), tc3=((Math.round((nx2-T/2)/T))%NC+NC)%NC;
+    if(!isWall(tc2,tc3)){g.x=nx2;g.y=ny2;}
+    g.r=Math.round((g.y-T/2)/T); g.c=((Math.round((g.x-T/2)/T))%NC+NC)%NC;
+    if(g.x<0)g.x=NC*T; if(g.x>NC*T)g.x=0;
+  });
 }
 
 // ── INPUT ─────────────────────────────────────────────
@@ -684,12 +687,47 @@ document.addEventListener('keydown',e=>{
   if(ST==='bosswin'){if(e.code==='Space'){nextAfterBoss();return;}}
   if(ST==='gameover'||ST==='win'){if(e.code==='Space'){ST='title';return;}}
   if(ST==='store'){if(e.code==='Escape'||e.code==='KeyP'){ST='playing';return;}}
-
+  if(ST==='multiplayer'){
+    // Join ghost players by pressing their control keys.
+    GHOST_CONTROL_SETS.forEach((set,i)=>{
+      if([set.up,set.down,set.left,set.right].includes(e.code)){
+        if(!activePlayers[i]){
+          activePlayers[i]=true;
+          if(ghosts[i]) ghosts[i].player=i;
+          showMsg(`${set.label} joined!`);
+        }
+        if(ghosts[i]){
+          ghosts[i].qdr = e.code===set.up?-1: e.code===set.down?1: ghosts[i].qdr;
+          ghosts[i].qdc = e.code===set.left?-1: e.code===set.right?1: ghosts[i].qdc;
+        }
+      }
+    });
+    if(e.code==='Enter'||e.code==='Space'){
+      if(activePlayers.some(v=>v)){
+        multiMode=true;
+        multiplayerRoom=false;
+        ST='playing';
+        buildMaze(mapIndex);
+        resetRound();
+        ghosts.forEach((g,i)=>{g.player=activePlayers[i]?i:null; g.qdr=0; g.qdc=0;});
+        showMsg('Multiplayer ghost match started!');
+      } else {
+        showMsg('Need at least one ghost player to start.');
+      }
+      return;
+    }
+    if(e.code==='Escape'){
+      multiplayerRoom=false;
+      multiMode=false;
+      ST='title';
+      return;
+    }
+  }
   if(ST==='playing'||ST==='paused'){
     if(e.code==='Escape')  {ST=ST==='store'?'playing':'store';return;}
     if(e.code==='KeyP')    {ST=ST==='paused'?'playing':'paused';return;}
   }
-  if(ST==='playing'){
+  if(ST==='playing' && !multiMode){
     switch(e.code){
       case 'ArrowLeft':  pac.qr=0;pac.qc=-1;pac.qBuf=18;break;
       case 'ArrowRight': pac.qr=0;pac.qc=1; pac.qBuf=18;break;
@@ -698,6 +736,16 @@ document.addEventListener('keydown',e=>{
       case 'Space':
       case 'Enter': if(abQueue.length&&abCool<=0)useAbility();break;
     }
+  } else if(ST==='playing' && multiMode){
+    GHOST_CONTROL_SETS.forEach((set,i)=>{
+      if(!activePlayers[i]) return;
+      const g=ghosts[i];
+      if(!g||g.mode==='pen') return;
+      if(e.code===set.up){g.qdr=-1;g.qdc=0;}
+      if(e.code===set.down){g.qdr=1; g.qdc=0;}
+      if(e.code===set.left){g.qdr=0; g.qdc=-1;}
+      if(e.code===set.right){g.qdr=0; g.qdc=1;}
+    });
   }
 });
 
@@ -709,14 +757,14 @@ CV.addEventListener('touchend',e=>{
   if(ST==='intro'){advIntro(999);return;}
   if(ST==='title'){startGame();return;}
   if(ST==='deadwait'){doRespawn();return;}
-  if(ST==='playing'&&Math.max(Math.abs(dx),Math.abs(dy))>12){
+  if(ST==='playing'&&Math.max(Math.abs(dx),Math.abs(dy))>12 && !multiMode){
     if(Math.abs(dx)>Math.abs(dy)){pac.qr=0;pac.qc=dx>0?1:-1;pac.qBuf=18;}
     else{pac.qc=0;pac.qr=dy>0?1:-1;pac.qBuf=18;}
   }
 },{passive:true});
 
 document.getElementById('storebtn').addEventListener('click',()=>{if(ST==='playing'||ST==='title')ST='store';});
-document.getElementById('multibtn').addEventListener('click',()=>{multiMode=!multiMode;startGame();});
+document.getElementById('multibtn').addEventListener('click',()=>{enterMultiplayerRoom();});
 document.getElementById('upbtn').addEventListener('click',doUpgrade);
 
 // ── ABILITIES ─────────────────────────────────────────
@@ -880,9 +928,10 @@ function resetRound(){
   pac=makePac();
   ghosts=GNAMES.map((_,i)=>makeGhost(i));
   if(multiMode){
-    p2Ghost=0;
-    ghosts[0].p2=true;
-    ghosts[0].qdr=0;ghosts[0].qdc=0;
+    ghosts.forEach((g,i)=>{
+      if(activePlayers[i]){g.player=i; g.qdr=0; g.qdc=0;}
+      else g.player=null;
+    });
   }
   frightLeft=0;eatMul=1;
   shieldOn=false;speedOn=false;activeEff=null;
@@ -928,6 +977,42 @@ function startGame(){
   p2Score=0;
   ST='playing';
   updateUI();
+}
+
+function enterMultiplayerRoom(){
+  multiMode=false;
+  multiplayerRoom=true;
+  ST='multiplayer';
+  activePlayers=[false,false,false,false];
+  mapIndex=0;
+  buildMaze(mapIndex);
+  ghosts=GNAMES.map((_,i)=>makeGhost(i));
+  ghosts.forEach(g=>{g.player=null; g.qdr=0; g.qdc=0;});
+  showMsg('Press WASD / IJKL / TFGH / Arrow keys to join.');
+}
+
+function drawMultiplayerRoom(){
+  drawMaze();
+  drawGhosts();
+  drawParticles();
+  CX.fillStyle='rgba(0,0,0,.82)'; CX.fillRect(0,0,CV.width,CV.height);
+  CX.fillStyle='#FFD700'; CX.font='bold 18px Courier New'; CX.textAlign='center';
+  CX.fillText('MULTIPLAYER ROOM',CV.width/2,42);
+  CX.fillStyle='#fff'; CX.font='8px Courier New';
+  CX.fillText('Up to 4 players can join and control the ghosts.',CV.width/2,60);
+  CX.fillText('Press your control keys to claim a ghost.',CV.width/2,74);
+  CX.fillText('Then press ENTER to start, or ESC to return.',CV.width/2,88);
+  GHOST_CONTROL_SETS.forEach((set,i)=>{
+    const y=118+i*26;
+    CX.fillStyle=activePlayers[i]?'#7CFC00':'#999';
+    CX.font='bold 11px Courier New';
+    CX.fillText(`${set.label}: ${set.name} ${activePlayers[i]?'· JOINED':'· press any key'}`,CV.width/2,y);
+  });
+  ghosts.forEach((g,i)=>{
+    const x=68+i*68, y=CV.height-52;
+    CX.fillStyle=g.col; CX.beginPath();CX.arc(x,y,14,0,Math.PI*2);CX.fill();
+    CX.fillStyle='#fff'; CX.font='7px Courier New'; CX.fillText(g.name,x,y+22);
+  });
 }
 
 // ── DRAWING ───────────────────────────────────────────
@@ -1037,10 +1122,10 @@ function drawOneGhost(g,scale){
   let gc=g.col;
   if(g.fright){gc=(frightLeft<2200&&Math.floor(Date.now()/260)%2===0)?'#FFF':'#2233CC';}
   if(g.frozen){gc='#87CEEB';CX.globalAlpha=0.8;}
-  if(g.p2){// P2 ghost has a crown indicator
+  if(g.player!==null){
     CX.fillStyle='#FFD700';
     CX.beginPath();CX.arc(0,-r2-5,3,0,Math.PI*2);CX.fill();
-    CX.font='8px serif';CX.textAlign='center';CX.fillText('P2',0,-r2-8);
+    CX.font='8px serif';CX.textAlign='center';CX.fillText(`P${g.player+1}`,0,-r2-8);
   }
   CX.fillStyle=gc;CX.shadowColor=gc;CX.shadowBlur=4;
   CX.beginPath();CX.arc(0,-2*scale,r2,Math.PI,0);
@@ -1154,8 +1239,9 @@ function drawHUD(){
   }
   // Multiplayer indicator
   if(multiMode){
+    const playerCount=activePlayers.filter(Boolean).length||1;
     CX.fillStyle='#FF69B4';CX.font='7px Courier New';CX.textAlign='left';
-    CX.fillText(`P2: ${p2Score}pts`,2,22);
+    CX.fillText(`Ghost players: ${playerCount}`,2,22);
   }
 }
 
@@ -1244,7 +1330,7 @@ function drawTitle(){
   if(blink)CX.fillText('— PRESS SPACE TO START —',CV.width/2,220);
   CX.fillStyle='#666';CX.font='6px Courier New';
   CX.fillText('Use Store (left panel) to buy upgrades & maps',CV.width/2,238);
-  CX.fillText('Click MULTIPLAYER for P2 ghost (WASD)',CV.width/2,250);
+  CX.fillText('Click MULTIPLAYER ROOM to assign ghosts to players',CV.width/2,250);
 }
 
 function drawGameOver(){
@@ -1406,7 +1492,7 @@ function updateUI(){
   if(canUp){const k=AKEYS.find(k=>abTok[k]>=3&&abLv[k]<3);btn.textContent=`⬆ UPGRADE ${DEFS[k].ic} (3 tokens)`;}
   else btn.textContent='⬆ UPGRADE (need 3 tokens)';
   // Store button unlocked items
-  document.getElementById('multibtn').textContent=multiMode?'👥 MULTI: ON':'👥 MULTIPLAYER';
+  document.getElementById('multibtn').textContent=multiMode?'👥 MULTI MATCH':'👥 MULTIPLAYER ROOM';
 }
 
 let msgTimeout;
@@ -1439,6 +1525,8 @@ function loop(now){
   }
   // ── TITLE
   if(ST==='title'){drawTitle();requestAnimationFrame(loop);return;}
+  // ── MULTIPLAYER ROOM
+  if(ST==='multiplayer'){drawMultiplayerRoom();drawMsg(dt);requestAnimationFrame(loop);return;}
   // ── STORE
   if(ST==='store'){drawStore();drawMsg(dt);requestAnimationFrame(loop);return;}
   // ── GAME OVER / WIN
@@ -1466,7 +1554,7 @@ function loop(now){
 
     stepPac(dt);
     ghosts.forEach(g=>stepGhost(g,dt));
-    stepP2Ghost(dt);
+    stepPlayerGhosts(dt);
     if(ST==='boss') stepBoss(dt);
 
     // Projectiles
