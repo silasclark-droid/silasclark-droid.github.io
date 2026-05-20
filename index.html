@@ -1121,7 +1121,11 @@ function drawMultiplayerRoom(){
     CX.fillStyle='#7CFC00'; CX.fillText(`CONTROLLING GHOST ${clientGhostId+1}`,CV.width/2,112);
   }
   CX.fillStyle='#999'; CX.font='7px Courier New';
-  CX.fillText('Hit ESC to return to title.',CV.width/2,138seMenu.id='pauseMenu';
+  CX.fillText('Hit ESC to return to title.',CV.width/2,138);
+}
+
+const pauseMenu=document.createElement('div');
+pauseMenu.id='pauseMenu';
 pauseMenu.style.position='absolute';
 pauseMenu.style.left='50%';
 pauseMenu.style.top='50%';
