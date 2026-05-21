@@ -315,6 +315,7 @@ const GCOLS=['#FF0000','#FFB8FF','#00FFFF','#FFB852'];
 const GNAMES=['Blinky','Pinky','Inky','Clyde'];
 
 // ── STORE ─────────────────────────────────────────────
+const MAP_ITEM_INDEX={map2:1,map3:2,map4:3};
 const STORE_ITEMS=[
   {id:'speed_up',  name:'Speed Boost',     desc:'Pac-Man permanently 10% faster',cost:200, icon:'💨',type:'upgrade',max:3},
   {id:'extra_life',name:'Extra Life',      desc:'+1 life',                        cost:300, icon:'❤️',type:'upgrade',max:99},
@@ -382,6 +383,8 @@ let peerPacClientId=null;
 let peerGhostMap={};
 let clientRole=null;
 let clientGhostId=null;
+let hostRole='ghost';
+let hostGhostId=null;
 let lastPeerSend=0;
 let gameMode='classic'; // classic|survival|timeattack
 let timeLeft=0;
@@ -439,8 +442,29 @@ function makePac(){
     prog:0,          // 0-1 progress to next tile
     nr:23,nc:14,     // next tile
     mouth:0.05,mdir:1,
-    alive:true,deathF:0
+    alive:true,deathF:0,
+    ai:false
   };
+}
+
+function choosePacDirection(){
+  const options=[{dr:-1,dc:0},{dr:1,dc:0},{dr:0,dc:-1},{dr:0,dc:1}];
+  const valid=options.filter(d=>!isWall(pac.r+d.dr,pac.c+d.dc));
+  if(!valid.length) return;
+  const nearest=ghosts.filter(g=>g.mode!=='pen').reduce((best,g)=>{
+    const dist=Math.hypot(g.r-pac.r,g.c-pac.c);
+    return !best||dist<best.dist?{ghost:g,dist}:best;
+  },null);
+  if(nearest){
+    let best=null;
+    valid.forEach(d=>{
+      const dist=Math.hypot((pac.r+d.dr)-nearest.ghost.r,(pac.c+d.dc)-nearest.ghost.c);
+      if(!best||dist>best.dist){best={dir:d,dist};}
+    });
+    if(best){ pac.qr=best.dir.dr; pac.qc=best.dir.dc; return; }
+  }
+  const choice=valid[Math.floor(Math.random()*valid.length)];
+  pac.qr=choice.dr; pac.qc=choice.dc;
 }
 
 const SNAP=4; // px threshold for direction change attempt
@@ -459,18 +483,25 @@ function stepPac(dt){
   const nearX=Math.abs(pac.x-midX)<SNAP+spd, nearY=Math.abs(pac.y-midY)<SNAP+spd;
 
   if(nearX&&nearY){
-    // Try queued direction
-    if(pac.qBuf>0){
-      pac.qBuf--;
-      if(!isWall(tileR+pac.qr,tileC+pac.qc)){
-        pac.dr=pac.qr; pac.dc=pac.qc; pac.qBuf=0;
-        pac.x=midX; pac.y=midY;
+    if(pac.ai){
+      if(!pac.dr&&!pac.dc || isWall(tileR+pac.dr,tileC+pac.dc)){
+        choosePacDirection();
+        pac.dr=pac.qr; pac.dc=pac.qc; pac.x=midX; pac.y=midY;
       }
-    }
-    // Current direction blocked → stop
-    if(pac.dr!==0||pac.dc!==0){
-      if(isWall(tileR+pac.dr,tileC+pac.dc)){
-        pac.x=midX; pac.y=midY; pac.dr=0; pac.dc=0;
+    } else {
+      // Try queued direction
+      if(pac.qBuf>0){
+        pac.qBuf--;
+        if(!isWall(tileR+pac.qr,tileC+pac.qc)){
+          pac.dr=pac.qr; pac.dc=pac.qc; pac.qBuf=0;
+          pac.x=midX; pac.y=midY;
+        }
+      }
+      // Current direction blocked → stop
+      if(pac.dr!==0||pac.dc!==0){
+        if(isWall(tileR+pac.dr,tileC+pac.dc)){
+          pac.x=midX; pac.y=midY; pac.dr=0; pac.dc=0;
+        }
       }
     }
   }
@@ -548,8 +579,40 @@ function checkGhostCollision(){
           ghostEaten(g);
         }
       } else if(!eaten&&g.mode!=='eaten'&&!fright){
+        if(multiMode && pac.ai){
+          handleMultiplayerPacEaten(g);
+          return;
+        }
         if(shieldOn){boom(g.x,g.y,'#9B59B6',8);return;}
         doPacDeath();
+      }
+    }
+  });
+}
+
+function handleMultiplayerPacEaten(g){
+  if(!multiMode || !pac.ai) return;
+  const winnerGhostId=g.id;
+  showMsg(`${g.name} ate Pac-Man! Now they control Pac.`);
+  if(ghosts[winnerGhostId]){
+    ghosts[winnerGhostId].player=null;
+    ghosts[winnerGhostId].mode='pen';
+    ghosts[winnerGhostId].penTimer=1000 + winnerGhostId*300;
+    ghosts[winnerGhostId].qdr=0; ghosts[winnerGhostId].qdc=0;
+    activePlayers[winnerGhostId]=false;
+  }
+  pac.ai=false;
+  pac.qr=0; pac.qc=0; pac.qBuf=0;
+  if(peerRole==='host' && hostGhostId===winnerGhostId){
+    hostRole='pac';
+    hostGhostId=null;
+  }
+  Object.entries(peerPlayerRoles).forEach(([peerId,roleInfo])=>{
+    if(roleInfo.role==='ghost' && roleInfo.ghostId===winnerGhostId){
+      peerPlayerRoles[peerId]={role:'pac',ghostId:null};
+      const conn=peerDataConns[peerId];
+      if(conn&&conn.open){
+        conn.send(JSON.stringify({type:'assign',role:'pac',ghostId:null}));
       }
     }
   });
@@ -768,14 +831,39 @@ document.addEventListener('keydown',e=>{
     if(e.code==='Escape')  {ST=ST==='store'?'playing':'store';return;}
     if(e.code==='KeyP')    {ST=ST==='paused'?'playing':'paused';pauseMenu.style.display=ST==='paused'?'block':'none';return;}
   }
-  if(ST==='playing' && multiMode && peerRole==='client'){
-    switch(e.code){
-      case 'ArrowLeft': sendClientCommand(0,-1); break;
-      case 'ArrowRight': sendClientCommand(0,1); break;
-      case 'ArrowUp': sendClientCommand(-1,0); break;
-      case 'ArrowDown': sendClientCommand(1,0); break;
+  if(ST==='playing' && multiMode){
+    if(peerRole==='client'){
+      if(clientRole==='ghost' || clientRole==='pac'){
+        switch(e.code){
+          case 'ArrowLeft': sendClientCommand(0,-1); break;
+          case 'ArrowRight': sendClientCommand(0,1); break;
+          case 'ArrowUp': sendClientCommand(-1,0); break;
+          case 'ArrowDown': sendClientCommand(1,0); break;
+        }
+        return;
+      }
     }
-    return;
+    if(peerRole==='host'){
+      if(hostRole==='ghost' && hostGhostId!=null){
+        const g=ghosts[hostGhostId];
+        if(g && g.mode!=='pen'){
+          if(e.code==='ArrowLeft'){g.qdr=0;g.qdc=-1;}
+          if(e.code==='ArrowRight'){g.qdr=0;g.qdc=1;}
+          if(e.code==='ArrowUp'){g.qdr=-1;g.qdc=0;}
+          if(e.code==='ArrowDown'){g.qdr=1;g.qdc=0;}
+        }
+        return;
+      }
+      if(hostRole==='pac'){
+        switch(e.code){
+          case 'ArrowLeft':  pac.qr=0;pac.qc=-1;pac.qBuf=18;break;
+          case 'ArrowRight': pac.qr=0;pac.qc=1; pac.qBuf=18;break;
+          case 'ArrowUp':    pac.qr=-1;pac.qc=0;pac.qBuf=18;break;
+          case 'ArrowDown':  pac.qr=1; pac.qc=0;pac.qBuf=18;break;
+        }
+        return;
+      }
+    }
   }
   if(ST==='playing' && !multiMode){
     switch(e.code){
@@ -790,16 +878,6 @@ document.addEventListener('keydown',e=>{
       case 'Space':
       case 'Enter': if(abQueue.length&&abCool<=0)useAbility();break;
     }
-  } else if(ST==='playing' && multiMode){
-    GHOST_CONTROL_SETS.forEach((set,i)=>{
-      if(!activePlayers[i]) return;
-      const g=ghosts[i];
-      if(!g||g.mode==='pen') return;
-      if(e.code===set.up){g.qdr=-1;g.qdc=0;}
-      if(e.code===set.down){g.qdr=1; g.qdc=0;}
-      if(e.code===set.left){g.qdr=0; g.qdc=-1;}
-      if(e.code===set.right){g.qdr=0; g.qdc=1;}
-    });
   }
 });
 
@@ -960,7 +1038,6 @@ function endBoss(){
 function nextAfterBoss(){
   boss=null; bossFright=false;
   level++;
-  if(level%5===0) mapIndex=Math.floor(level/5)%4;
   setDifficulty(level);
   updateMapScale();
   buildMaze(mapIndex);
@@ -1014,8 +1091,23 @@ function buyItem(item){
   if(item.id==='magnet'){
     showMsg(`Ghost magnet unlocked!`);
   }
+  if(item.id==='survival'){
+    gameMode='survival';
+    showMsg(`Survival mode unlocked!`);
+  }
+  if(item.id==='timeattack'){
+    gameMode='timeattack';
+    timeLeft=60000;
+    showMsg(`Time attack unlocked!`);
+  }
   if(item.type==='map'){
+    mapIndex=MAP_ITEM_INDEX[item.id]||mapIndex;
     showMsg(`${item.name} unlocked!`);
+    if(ST==='playing'){
+      buildMaze(mapIndex);
+      resetRound();
+      showMsg(`Switched to ${item.name}.`);
+    }
   }
   boom(CV.width/2,CV.height/2,'#FFD700',30);
   updateUI();
@@ -1036,7 +1128,7 @@ function makePeer(id){
 }
 function destroyPeer(){
   if(peer){ try{peer.destroy();}catch{} peer=null; }
-  peerRole=null; peerRoomId=''; peerStatus='idle'; peerConn=null; peerDataConns={}; peerPlayerRoles={}; peerPacClientId=null; peerGhostMap={}; clientRole=null; clientGhostId=null;
+  peerRole=null; peerRoomId=''; peerStatus='idle'; peerConn=null; peerDataConns={}; peerPlayerRoles={}; peerPacClientId=null; peerGhostMap={}; clientRole=null; clientGhostId=null; hostRole='ghost'; hostGhostId=null;
 }
 function randomRoomCode(){ return Math.random().toString(36).slice(2,6).toUpperCase(); }
 function setupHostConnection(conn){
@@ -1065,13 +1157,12 @@ function startMatch(){
   const peerIds=Object.keys(peerDataConns);
   const playerCount=peerIds.length;
   if(playerCount===0){ showMsg('Need at least one player to start.'); return; }
-  const pacIndex=Math.floor(Math.random()*playerCount);
-  const ghostIds=[0,3,1,2]; // first available ghost is red, next is yellow
-  peerIds.forEach((peerId,index)=>{
-    if(index===pacIndex){
-      peerPlayerRoles[peerId]={role:'pac',ghostId:null};
-      peerPacClientId=peerId;
-    } else if(ghostIds.length>0){
+  const ghostIds=[0,1,2,3];
+  hostGhostId=ghostIds.shift();
+  hostRole='ghost';
+  peerPacClientId=null;
+  peerIds.forEach(peerId=>{
+    if(ghostIds.length>0){
       const ghostId=ghostIds.shift();
       peerPlayerRoles[peerId]={role:'ghost',ghostId};
     } else {
@@ -1083,11 +1174,15 @@ function startMatch(){
   multiplayerRoom=false;
   ST='playing';
   activePlayers=[false,false,false,false];
+  if(hostGhostId!=null) activePlayers[hostGhostId]=true;
   peerIds.forEach(peerId=>{
     const roleInfo=peerPlayerRoles[peerId];
     if(roleInfo.role==='ghost' && roleInfo.ghostId!=null){ activePlayers[roleInfo.ghostId]=true; }
   });
+
   resetRound();
+  pac.ai=true;
+  if(hostGhostId!=null){ showMsg(`Host controls Ghost ${hostGhostId+1}`); }
   updateUI();
 
   Object.entries(peerDataConns).forEach(([peerId,conn])=>{
@@ -1098,7 +1193,7 @@ function startMatch(){
       conn.send(JSON.stringify({type:'start'}));
     }
   });
-  showMsg('Multiplayer match started!');
+  showMsg('Multiplayer ghost hunt started!');
 }
 function startMultiplayerClient(){ multiMode=true; multiplayerRoom=false; ST='playing'; updateUI(); showMsg('Joined room. Match started.'); }
 function handlePeerMessage(conn,data){
@@ -1183,11 +1278,10 @@ function startGame(){
   AKEYS.forEach(k=>{abTok[k]=0;abLv[k]=1;});
   abQueue=[];abCool=0;lastAb=null;
   parts=[];projectiles=[];boss=null;
-  mapIndex=0;
   doublePoints=false;
   setDifficulty(level);
   updateMapScale();
-  buildMaze(0);
+  buildMaze(mapIndex||0);
   resetRound();
   p2Score=0;
   ST='playing';
